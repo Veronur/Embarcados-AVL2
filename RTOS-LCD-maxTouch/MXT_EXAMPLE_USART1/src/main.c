@@ -108,6 +108,10 @@
 #define BUT3_IDX  19
 #define BUT3_IDX_MASK (1 << BUT3_IDX)
 
+
+/************************************************************************/
+/* ADC                                                                  */
+/************************************************************************/
 /** The conversion data is done flag */
 volatile bool g_is_conversion_done = false;
 volatile bool pot_is_conversion_done = false;
@@ -116,7 +120,6 @@ volatile bool pot_is_conversion_done = false;
 volatile uint32_t g_ul_value = 0;
 volatile uint32_t pot_ul_value = 0;
 
-volatile int but_freq = 50;
 
 /* Canal do sensor de temperatura */
 #define AFEC_CHANNEL_TEMP_SENSOR 11
@@ -130,7 +133,11 @@ volatile int but_freq = 50;
 /** 2^12 - 1                  */
 #define MAX_DIGITAL     (4095)
 
-SemaphoreHandle_t xSemaphore;
+
+volatile int but_freq = 50;
+
+
+SemaphoreHandle_t semaforo_duty;
 /************************************************************************/
 /* LCD + TOUCH                                                          */
 /************************************************************************/
@@ -158,6 +165,11 @@ const uint32_t BUTTON_Y = ILI9488_LCD_HEIGHT/2;
 #define TASK_DUTY_STACK_SIZE            (2*1024/sizeof(portSTACK_TYPE))
 #define TASK_DUTY_STACK_PRIORITY        (tskIDLE_PRIORITY)
 
+//PROTOTYPE
+void io_init(void);
+void but_freqM_callback();
+void but_freqME_callback();
+
 
 typedef struct {
   uint x;
@@ -165,7 +177,12 @@ typedef struct {
 } touchData;
 
 QueueHandle_t xQueueTouch;
+SemaphoreHandle_t semaforo_duty;
+SemaphoreHandle_t semaforo_updateduty;
 
+/************************************************************************/
+/* handler/callbacks                                                    */
+/************************************************************************/
 
 /**
  * \brief AFEC interrupt callback function.
@@ -173,13 +190,40 @@ QueueHandle_t xQueueTouch;
 static void AFEC_Temp_callback(void)
 {
 	g_ul_value = afec_channel_get_value(AFEC0, AFEC_CHANNEL_TEMP_SENSOR);
-	g_is_conversion_done = true;
+  printf("%d\n", g_ul_value);
 }
+
+
 static void AFEC_POT_callback(void)
 {
 	pot_ul_value = afec_channel_get_value(AFEC0, AFEC_CHANNEL_potenci_SENSOR);
 	pot_is_conversion_done = true;
 }
+
+void but_freqM_callback(void)
+{
+	if (but_freq<100)
+	{
+		but_freq++;
+		BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+		xSemaphoreGiveFromISR(semaforo_duty, &xHigherPriorityTaskWoken);
+	}
+	
+}
+
+void but_freqME_callback(void)
+{
+	if (but_freq>0)
+	{
+		but_freq--;
+		BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+		xSemaphoreGiveFromISR(semaforo_duty, &xHigherPriorityTaskWoken);
+		
+	}
+
+}
+
+
 static void config_ADC_TEMP(void){
 /*************************************
    * Ativa e configura AFEC
@@ -200,7 +244,7 @@ static void config_ADC_TEMP(void){
 	afec_set_trigger(AFEC0, AFEC_TRIG_SW);
 
 	/* configura call back */
-	afec_set_callback(AFEC0, AFEC_INTERRUPT_EOC_11,	AFEC_Temp_callback, 1);
+	afec_set_callback(AFEC0, AFEC_INTERRUPT_EOC_11,	AFEC_Temp_callback, 5);
 
 	/*** Configuracao específica do canal AFEC ***/
 	struct afec_ch_config afec_ch_cfg;
@@ -225,6 +269,8 @@ static void config_ADC_TEMP(void){
 	afec_channel_enable(AFEC0, AFEC_CHANNEL_TEMP_SENSOR);
 }
 
+
+
 static void config_ADC_POT(void){
 /*************************************
    * Ativa e configura AFEC
@@ -245,7 +291,7 @@ static void config_ADC_POT(void){
 	afec_set_trigger(AFEC0, AFEC_TRIG_SW);
 
 	/* configura call back */
-	afec_set_callback(AFEC0, AFEC_INTERRUPT_EOC_0,	AFEC_POT_callback, 1);
+	afec_set_callback(AFEC0, AFEC_INTERRUPT_EOC_0,	AFEC_POT_callback, 5);
 
 	/*** Configuracao específica do canal AFEC ***/
 	struct afec_ch_config afec_ch_cfg;
@@ -465,7 +511,11 @@ void draw_temp(){
 	font_draw_text(&digital52, "15", 160, 350, 1);
 }
 void draw_ar(){
-	font_draw_text(&digital52, "100", 160, 200, 1);
+	char dut[32];
+	sprintf(dut, "%d",but_freq);
+	ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
+	ili9488_draw_filled_rectangle(160, 200, 232, 252);
+	font_draw_text(&digital52, dut, 160, 200, 1);
 	font_draw_text(&digital52, "%", 250, 200, 1);
 }
 void draw_screen(void) {
@@ -558,20 +608,18 @@ void mxt_handler(struct mxt_device *device, uint *x, uint *y)
 /************************************************************************/
 
 void task_duty(void){
-	xSemaphore = xSemaphoreCreateBinary();
-
+	semaforo_duty = xSemaphoreCreateBinary();
+	io_init();
 	while(true){
 		
-		char dut[32];
-		sprintf(dut, "%d",but_freq);
-		
-		if( xSemaphoreTake(xSemaphore, 0) == pdTRUE ){
-			ili9488_set_foreground_color(COLOR_CONVERT(COLOR_RED));
-			ili9488_draw_filled_rectangle(160, 200, 200, 300);
-			font_draw_text(&digital52, dut, 160, 200, 1);
+		if( xSemaphoreTake(semaforo_duty,  0) == pdTRUE ){
+			printf("Duty Clicle: %d \n",but_freq);
+			BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+			xSemaphoreGiveFromISR(semaforo_updateduty, &xHigherPriorityTaskWoken);
+		}
 	}
 }
-}
+
 void task_mxt(void){
   
   	struct mxt_device device; /* Device data container */
@@ -591,17 +639,29 @@ void task_mxt(void){
 
 void task_lcd(void){
   xQueueTouch = xQueueCreate( 10, sizeof( touchData ) );
+  semaforo_updateduty =  xSemaphoreCreateBinary();
 	configure_lcd();
   
-  draw_screen();
+ draw_screen();
   // Escreve HH:MM no LCD
   font_draw_text(&digital52, "HH:MM", 10, 10, 1);
-  draw_icons();
-  draw_temp();
-  draw_ar();
+	draw_icons();
+	draw_ar();
+//
+	draw_temp();
+  
+	
   touchData touch;
-    
+  
+  
+  
+  
   while (true) {  
+	 if(xSemaphoreTake(semaforo_updateduty,  0) == pdTRUE ){
+		  draw_ar();
+	  }
+	  
+	  
      if (xQueueReceive( xQueueTouch, &(touch), ( TickType_t )  500 / portTICK_PERIOD_MS)) {
        update_screen(touch.x, touch.y);
        printf("x:%d y:%d\n", touch.x, touch.y);
@@ -609,30 +669,17 @@ void task_lcd(void){
   }	 
 }
 
-void task_temp(void){
-	const TickType_t xDelay = 4000 / portTICK_PERIOD_MS;
+void task_afec(void){
+	config_ADC_TEMP();
 	
-	//while(true){
-	////char 	
-	//
-	//vTaskDelay(xDelay);
-	//}
+	while (true) {
+		printf("Starting ADC\n");
+		afec_start_software_conversion(AFEC0);
+		vTaskDelay(1000);
+	}
 }
 
-void but_freqM_callback(void)
-{
-		but_freq++;
-		BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-		xSemaphoreGiveFromISR(xSemaphore, &xHigherPriorityTaskWoken);
-}
 
-void but_freqME_callback(void)
-{
-	but_freq++;
-	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-	xSemaphoreGiveFromISR(xSemaphore, &xHigherPriorityTaskWoken);
-
-}
 
 void io_init(void)
 {
@@ -643,34 +690,39 @@ void io_init(void)
 
 	// Inicializa clock do periférico PIO responsavel pelo botao
 	pmc_enable_periph_clk(BUT1_PIO_ID);
-	pmc_enable_periph_clk(BUT3_PIO_ID);
-
-	// Configura PIO para lidar com o pino do botão como entrada
-	// com pull-up
-	pio_configure(BUT1_PIO, PIO_INPUT, BUT1_IDX_MASK, PIO_PULLUP);
-	pio_configure(BUT3_PIO, PIO_INPUT, BUT3_IDX_MASK, PIO_PULLUP);
-
+	pio_configure(BUT1_PIO, PIO_INPUT, BUT1_IDX_MASK, PIO_PULLUP| PIO_DEBOUNCE);
+	pio_set_debounce_filter(BUT1_PIO,  BUT1_IDX_MASK, 10);
+	
+	pmc_enable_periph_clk(BUT3_PIO_ID);	
+	pio_configure(BUT3_PIO, PIO_INPUT, BUT3_IDX_MASK, PIO_PULLUP| PIO_DEBOUNCE);
+	pio_set_debounce_filter(BUT3_PIO, BUT3_IDX_MASK, 10);
 
 	pio_handler_set(BUT3_PIO,
 	BUT3_PIO_ID,
 	BUT3_IDX_MASK,
 	PIO_IT_FALL_EDGE,
 	but_freqM_callback);
+	
 	pio_handler_set(BUT1_PIO,
 	BUT1_PIO_ID,
 	BUT1_IDX_MASK,
 	PIO_IT_FALL_EDGE,
 	but_freqME_callback);
-
-
-	pio_enable_interrupt(BUT1_PIO, BUT1_IDX_MASK);
-	pio_enable_interrupt(BUT3_PIO, BUT3_IDX_MASK);
-
-
+	
+	
+	
 	NVIC_EnableIRQ(BUT3_PIO_ID);
-	NVIC_SetPriority(BUT3_PIO_ID, 3); // Prioridade 4
+	NVIC_SetPriority(BUT3_PIO_ID, 5); // Prioridade 6
+	
+	pio_enable_interrupt(BUT3_PIO, BUT3_IDX_MASK);
+	
+	
+	
 	NVIC_EnableIRQ(BUT1_PIO_ID);
-	NVIC_SetPriority(BUT1_PIO_ID, 3); // Prioridade 4
+	NVIC_SetPriority(BUT1_PIO_ID, 5); // Prioridade 6	
+	pio_enable_interrupt(BUT1_PIO, BUT1_IDX_MASK);	
+	
+	
 }
 
 /************************************************************************/
@@ -686,7 +738,7 @@ int main(void)
 		.paritytype   = USART_SERIAL_PARITY,
 		.stopbits     = USART_SERIAL_STOP_BIT
 	};
-
+	
 	sysclk_init(); /* Initialize system clocks */
 	board_init();  /* Initialize board */
 	
@@ -697,15 +749,14 @@ int main(void)
 	config_ADC_TEMP();
 	config_ADC_POT();
 
-	/* Create task to handler temp */
-	if (xTaskCreate(task_duty, "duty", TASK_DUTY_STACK_SIZE, NULL, TASK_DUTY_STACK_PRIORITY, NULL) != pdPASS) {
-		printf("Failed to create test TEMP task\r\n");
-	}
 	
-	/* Create task to handler temp */
-	if (xTaskCreate(task_temp, "temp", TASK_TEMP_STACK_SIZE, NULL, TASK_TEMP_STACK_PRIORITY, NULL) != pdPASS) {
-		printf("Failed to create test TEMP task\r\n");
-	}
+	
+	
+	
+	///* Create task to handler temp */
+	//if (xTaskCreate(task_temp, "temp", TASK_TEMP_STACK_SIZE, NULL, TASK_TEMP_STACK_PRIORITY, NULL) != pdPASS) {
+		//printf("Failed to create test TEMP task\r\n");
+	//}
 
   /* Create task to handler touch */
   if (xTaskCreate(task_mxt, "mxt", TASK_MXT_STACK_SIZE, NULL, TASK_MXT_STACK_PRIORITY, NULL) != pdPASS) {
@@ -717,8 +768,28 @@ int main(void)
     printf("Failed to create test LCD task\r\n");
   }
 
+   /* Create task to handler AFEC */
+   if (xTaskCreate(task_afec, "afec", TASK_LCD_STACK_SIZE, NULL, TASK_LCD_STACK_PRIORITY, NULL) != pdPASS) {
+	   printf("Failed to create test afec task\r\n");
+   }
+	/* Create task to handler duty */
+	if (xTaskCreate(task_duty, "duty", TASK_DUTY_STACK_SIZE, NULL, TASK_DUTY_STACK_PRIORITY, NULL) != pdPASS) {
+		printf("Failed to create test DUTY task\r\n");
+	}
+  
   /* Start the scheduler. */
   vTaskStartScheduler();
+  
+	
+	
+	
+	 printf("aqui");
+	
+
+	
+	
+	
+	
 
   while(1){
 
