@@ -109,6 +109,23 @@
 #define BUT3_IDX_MASK (1 << BUT3_IDX)
 
 
+#define PIO_PWM_0 PIOA
+#define ID_PIO_PWM_0 ID_PIOA
+#define MASK_PIN_PWM_0 (1 << 0)
+
+
+/** PWM frequency in Hz */
+#define PWM_FREQUENCY      1000
+/** Period value of PWM output waveform */
+#define PERIOD_VALUE       100
+/** Initial duty cycle value */
+#define INIT_DUTY_VALUE    0
+
+
+/** PWM channel instance for LEDs */
+pwm_channel_t g_pwm_channel_led;
+
+
 /************************************************************************/
 /* ADC                                                                  */
 /************************************************************************/
@@ -122,7 +139,7 @@ volatile uint32_t pot_ul_value = 0;
 
 
 /* Canal do sensor de temperatura */
-#define AFEC_CHANNEL_TEMP_SENSOR 11
+#define AFEC_CHANNEL_TEMP_SENSOR 0
 
 #define AFEC_CHANNEL_potenci_SENSOR 0
 
@@ -138,6 +155,7 @@ volatile int but_freq = 50;
 
 
 SemaphoreHandle_t semaforo_duty;
+SemaphoreHandle_t semaforo_updatetemp;
 /************************************************************************/
 /* LCD + TOUCH                                                          */
 /************************************************************************/
@@ -189,7 +207,7 @@ SemaphoreHandle_t semaforo_updateduty;
  */
 static void AFEC_Temp_callback(void)
 {
-	g_ul_value = afec_channel_get_value(AFEC0, AFEC_CHANNEL_TEMP_SENSOR);
+	g_ul_value = afec_channel_get_value(AFEC0, AFEC_CHANNEL_TEMP_SENSOR)*50/4095;
   printf("%d\n", g_ul_value);
 }
 
@@ -244,7 +262,7 @@ static void config_ADC_TEMP(void){
 	afec_set_trigger(AFEC0, AFEC_TRIG_SW);
 
 	/* configura call back */
-	afec_set_callback(AFEC0, AFEC_INTERRUPT_EOC_11,	AFEC_Temp_callback, 5);
+	afec_set_callback(AFEC0, AFEC_INTERRUPT_EOC_0,	AFEC_Temp_callback, 5);
 
 	/*** Configuracao específica do canal AFEC ***/
 	struct afec_ch_config afec_ch_cfg;
@@ -381,6 +399,41 @@ static void configure_lcd(void){
  *
  * \param device Pointer to mxt_device struct
  */
+
+void PWM0_init(uint channel, uint duty){
+	/* Enable PWM peripheral clock */
+	pmc_enable_periph_clk(ID_PWM0);
+
+	/* Disable PWM channels for LEDs */
+	pwm_channel_disable(PWM0, PIN_PWM_LED0_CHANNEL);
+
+	/* Set PWM clock A as PWM_FREQUENCY*PERIOD_VALUE (clock B is not used) */
+	pwm_clock_t clock_setting = {
+		.ul_clka = PWM_FREQUENCY * PERIOD_VALUE,
+		.ul_clkb = 0,
+		.ul_mck = sysclk_get_peripheral_hz()
+	};
+	
+	pwm_init(PWM0, &clock_setting);
+
+	/* Initialize PWM channel for LED0 */
+	/* Period is left-aligned */
+	g_pwm_channel_led.alignment = PWM_ALIGN_CENTER;
+	/* Output waveform starts at a low level */
+	g_pwm_channel_led.polarity = PWM_HIGH;
+	/* Use PWM clock A as source clock */
+	g_pwm_channel_led.ul_prescaler = PWM_CMR_CPRE_CLKA;
+	/* Period value of output waveform */
+	g_pwm_channel_led.ul_period = PERIOD_VALUE;
+	/* Duty cycle value of output waveform */
+	g_pwm_channel_led.ul_duty = duty;
+	g_pwm_channel_led.channel = channel;
+	pwm_channel_init(PWM0, &g_pwm_channel_led);
+	
+	/* Enable PWM channels for LEDs */
+	pwm_channel_enable(PWM0, channel);
+}
+
 static void mxt_init(struct mxt_device *device)
 {
 	enum status_code status;
@@ -508,7 +561,14 @@ void font_draw_text(tFont *font, const char *text, int x, int y, int spacing) {
 	}
 }
 void draw_temp(){
-	font_draw_text(&digital52, "15", 160, 350, 1);
+	
+	char temp[32];
+	sprintf(temp, "%d",g_ul_value);
+	ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
+	ili9488_draw_filled_rectangle(160, 350, 232, 420);
+	font_draw_text(&digital52, temp, 160, 350, 1);
+	
+	//font_draw_text(&digital52, "15", 160, 350, 1);
 }
 void draw_ar(){
 	char dut[32];
@@ -614,6 +674,7 @@ void task_duty(void){
 		
 		if( xSemaphoreTake(semaforo_duty,  0) == pdTRUE ){
 			printf("Duty Clicle: %d \n",but_freq);
+			
 			BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 			xSemaphoreGiveFromISR(semaforo_updateduty, &xHigherPriorityTaskWoken);
 		}
@@ -640,6 +701,8 @@ void task_mxt(void){
 void task_lcd(void){
   xQueueTouch = xQueueCreate( 10, sizeof( touchData ) );
   semaforo_updateduty =  xSemaphoreCreateBinary();
+  semaforo_updatetemp = xSemaphoreCreateBinary();
+  
 	configure_lcd();
   
  draw_screen();
@@ -647,7 +710,6 @@ void task_lcd(void){
   font_draw_text(&digital52, "HH:MM", 10, 10, 1);
 	draw_icons();
 	draw_ar();
-//
 	draw_temp();
   
 	
@@ -661,6 +723,10 @@ void task_lcd(void){
 		  draw_ar();
 	  }
 	  
+	  if (xSemaphoreTake(semaforo_updatetemp,  0) == pdTRUE )
+	  {
+		  draw_temp();
+	  }
 	  
      if (xQueueReceive( xQueueTouch, &(touch), ( TickType_t )  500 / portTICK_PERIOD_MS)) {
        update_screen(touch.x, touch.y);
@@ -671,15 +737,25 @@ void task_lcd(void){
 
 void task_afec(void){
 	config_ADC_TEMP();
+	const TickType_t xDelay = 4000 / portTICK_PERIOD_MS;
 	
 	while (true) {
 		printf("Starting ADC\n");
 		afec_start_software_conversion(AFEC0);
-		vTaskDelay(1000);
+		BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+		xSemaphoreGiveFromISR(semaforo_updatetemp, &xHigherPriorityTaskWoken);
+		vTaskDelay(xDelay);
 	}
 }
 
-
+void task_led(void){
+	PWM0_init(0, but_freq);
+	const TickType_t xDelay = 10 / portTICK_PERIOD_MS;
+	while(true){
+			pwm_channel_update_duty(PWM0, &g_pwm_channel_led, 100-but_freq);
+			
+	}
+}
 
 void io_init(void)
 {
@@ -744,20 +820,12 @@ int main(void)
 	
 	/* Initialize stdio on USART */
 	stdio_serial_init(USART_SERIAL_EXAMPLE, &usart_serial_options);
-		
-	/* inicializa e configura adc */
-	config_ADC_TEMP();
-	config_ADC_POT();
+
+	  pmc_enable_periph_clk(ID_PIO_PWM_0);
+	  pio_set_peripheral(PIO_PWM_0, PIO_PERIPH_A, MASK_PIN_PWM_0 );
+	
 
 	
-	
-	
-	
-	///* Create task to handler temp */
-	//if (xTaskCreate(task_temp, "temp", TASK_TEMP_STACK_SIZE, NULL, TASK_TEMP_STACK_PRIORITY, NULL) != pdPASS) {
-		//printf("Failed to create test TEMP task\r\n");
-	//}
-
   /* Create task to handler touch */
   if (xTaskCreate(task_mxt, "mxt", TASK_MXT_STACK_SIZE, NULL, TASK_MXT_STACK_PRIORITY, NULL) != pdPASS) {
     printf("Failed to create test touch task\r\n");
@@ -776,14 +844,16 @@ int main(void)
 	if (xTaskCreate(task_duty, "duty", TASK_DUTY_STACK_SIZE, NULL, TASK_DUTY_STACK_PRIORITY, NULL) != pdPASS) {
 		printf("Failed to create test DUTY task\r\n");
 	}
-  
+  	 /* Create task to handler LED */
+  	 if (xTaskCreate(task_led, "LED", TASK_MXT_STACK_SIZE, NULL, TASK_MXT_STACK_PRIORITY, NULL) != pdPASS) {
+	  	 printf("Failed to create test LED task\r\n");
+  	 }
+	   
   /* Start the scheduler. */
   vTaskStartScheduler();
   
 	
 	
-	
-	 printf("aqui");
 	
 
 	
