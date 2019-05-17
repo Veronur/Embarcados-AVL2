@@ -561,7 +561,7 @@ void font_draw_text(tFont *font, const char *text, int x, int y, int spacing) {
 		p++;
 	}
 }
-void draw_temp( int32_t tempe){
+void draw_temp( int32_t tempe) {
 	
 	char temp[4];
 	sprintf(temp, "%d",tempe);
