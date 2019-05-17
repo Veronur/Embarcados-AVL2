@@ -134,7 +134,7 @@ volatile bool g_is_conversion_done = false;
 volatile bool pot_is_conversion_done = false;
 
 /** The conversion data value */
-volatile uint32_t g_ul_value = 0;
+//volatile uint32_t g_ul_value = 0;
 volatile uint32_t pot_ul_value = 0;
 
 
@@ -155,7 +155,7 @@ volatile int but_freq = 50;
 
 
 SemaphoreHandle_t semaforo_duty;
-SemaphoreHandle_t semaforo_updatetemp;
+//SemaphoreHandle_t semaforo_updatetemp;
 /************************************************************************/
 /* LCD + TOUCH                                                          */
 /************************************************************************/
@@ -174,7 +174,7 @@ const uint32_t BUTTON_Y = ILI9488_LCD_HEIGHT/2;
 #define TASK_MXT_STACK_SIZE            (2*1024/sizeof(portSTACK_TYPE))
 #define TASK_MXT_STACK_PRIORITY        (tskIDLE_PRIORITY)  
 
-#define TASK_LCD_STACK_SIZE            (2*1024/sizeof(portSTACK_TYPE))
+#define TASK_LCD_STACK_SIZE            (4*1024/sizeof(portSTACK_TYPE))
 #define TASK_LCD_STACK_PRIORITY        (tskIDLE_PRIORITY)
 
 #define TASK_TEMP_STACK_SIZE            (2*1024/sizeof(portSTACK_TYPE))
@@ -195,6 +195,7 @@ typedef struct {
 } touchData;
 
 QueueHandle_t xQueueTouch;
+QueueHandle_t xQueueTemp;
 SemaphoreHandle_t semaforo_duty;
 SemaphoreHandle_t semaforo_updateduty;
 
@@ -207,16 +208,12 @@ SemaphoreHandle_t semaforo_updateduty;
  */
 static void AFEC_Temp_callback(void)
 {
-	g_ul_value = afec_channel_get_value(AFEC0, AFEC_CHANNEL_TEMP_SENSOR)*50/4095;
-  printf("%d\n", g_ul_value);
+	 int32_t g_ul_value = afec_channel_get_value(AFEC0, AFEC_CHANNEL_TEMP_SENSOR)*50/4095;
+	xQueueSendFromISR( xQueueTemp, &g_ul_value, NULL);  
+  //printf("%d\n", g_ul_value);
 }
 
 
-static void AFEC_POT_callback(void)
-{
-	pot_ul_value = afec_channel_get_value(AFEC0, AFEC_CHANNEL_potenci_SENSOR);
-	pot_is_conversion_done = true;
-}
 
 void but_freqM_callback(void)
 {
@@ -289,47 +286,6 @@ static void config_ADC_TEMP(void){
 
 
 
-static void config_ADC_POT(void){
-/*************************************
-   * Ativa e configura AFEC
-   *************************************/
-  /* Ativa AFEC - 0 */
-	afec_enable(AFEC0);
-
-	/* struct de configuracao do AFEC */
-	struct afec_config afec_cfg;
-
-	/* Carrega parametros padrao */
-	afec_get_config_defaults(&afec_cfg);
-
-	/* Configura AFEC */
-	afec_init(AFEC0, &afec_cfg);
-
-	/* Configura trigger por software */
-	afec_set_trigger(AFEC0, AFEC_TRIG_SW);
-
-	/* configura call back */
-	afec_set_callback(AFEC0, AFEC_INTERRUPT_EOC_0,	AFEC_POT_callback, 5);
-
-	/*** Configuracao específica do canal AFEC ***/
-	struct afec_ch_config afec_ch_cfg;
-	afec_ch_get_config_defaults(&afec_ch_cfg);
-	afec_ch_cfg.gain = AFEC_GAINVALUE_0;
-	afec_ch_set_config(AFEC0, AFEC_CHANNEL_potenci_SENSOR, &afec_ch_cfg);
-
-	/*
-	* Calibracao:
-	* Because the internal ADC offset is 0x200, it should cancel it and shift
-	 down to 0.
-	 */
-	afec_channel_set_analog_offset(AFEC0, AFEC_CHANNEL_potenci_SENSOR, 0x200);
-
-	/***  Configura sensor de temperatura ***/
-
-
-	/* Selecina canal e inicializa conversão */
-	afec_channel_enable(AFEC0, AFEC_CHANNEL_potenci_SENSOR);
-}
 /************************************************************************/
 /* RTOS hooks                                                           */
 /************************************************************************/
@@ -519,6 +475,51 @@ static void mxt_init(struct mxt_device *device)
 			+ MXT_GEN_COMMANDPROCESSOR_CALIBRATE, 0x01);
 }
 
+
+void io_init(void)
+{
+
+	//// Configura led
+	//pmc_enable_periph_clk(LED_PIO_ID);
+	//pio_configure(LED_PIO, PIO_OUTPUT_0, LED_IDX_MASK, PIO_DEFAULT);
+
+	// Inicializa clock do periférico PIO responsavel pelo botao
+	pmc_enable_periph_clk(BUT1_PIO_ID);
+	pio_configure(BUT1_PIO, PIO_INPUT, BUT1_IDX_MASK, PIO_PULLUP| PIO_DEBOUNCE);
+	pio_set_debounce_filter(BUT1_PIO,  BUT1_IDX_MASK, 10);
+	
+	pmc_enable_periph_clk(BUT3_PIO_ID);
+	pio_configure(BUT3_PIO, PIO_INPUT, BUT3_IDX_MASK, PIO_PULLUP| PIO_DEBOUNCE);
+	pio_set_debounce_filter(BUT3_PIO, BUT3_IDX_MASK, 10);
+
+	pio_handler_set(BUT3_PIO,
+	BUT3_PIO_ID,
+	BUT3_IDX_MASK,
+	PIO_IT_FALL_EDGE,
+	but_freqM_callback);
+	
+	pio_handler_set(BUT1_PIO,
+	BUT1_PIO_ID,
+	BUT1_IDX_MASK,
+	PIO_IT_FALL_EDGE,
+	but_freqME_callback);
+	
+	
+	
+	NVIC_EnableIRQ(BUT3_PIO_ID);
+	NVIC_SetPriority(BUT3_PIO_ID, 5); // Prioridade 6
+	
+	pio_enable_interrupt(BUT3_PIO, BUT3_IDX_MASK);
+	
+	
+	
+	NVIC_EnableIRQ(BUT1_PIO_ID);
+	NVIC_SetPriority(BUT1_PIO_ID, 5); // Prioridade 6
+	pio_enable_interrupt(BUT1_PIO, BUT1_IDX_MASK);
+	
+	
+}
+
 /************************************************************************/
 /* funcoes                                                              */
 /************************************************************************/
@@ -560,15 +561,18 @@ void font_draw_text(tFont *font, const char *text, int x, int y, int spacing) {
 		p++;
 	}
 }
-void draw_temp(){
+void draw_temp( int32_t tempe){
 	
-	char temp[32];
-	sprintf(temp, "%d",g_ul_value);
+	char temp[4];
+	sprintf(temp, "%d",tempe);
 	ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
-	ili9488_draw_filled_rectangle(160, 350, 232, 420);
+	ili9488_draw_filled_rectangle(160, 350, 250, 420);
 	font_draw_text(&digital52, temp, 160, 350, 1);
-	
-	//font_draw_text(&digital52, "15", 160, 350, 1);
+	font_draw_text(&digital52, "C", 220, 350, 1);
+	ili9488_draw_filled_rectangle(0, 430, 320, 440);
+	ili9488_set_foreground_color(COLOR_CONVERT(COLOR_BLACK));
+	ili9488_draw_filled_rectangle(0, 430, 2*tempe*320/100, 440);
+	ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
 }
 void draw_ar(){
 	char dut[32];
@@ -701,7 +705,11 @@ void task_mxt(void){
 void task_lcd(void){
   xQueueTouch = xQueueCreate( 10, sizeof( touchData ) );
   semaforo_updateduty =  xSemaphoreCreateBinary();
-  semaforo_updatetemp = xSemaphoreCreateBinary();
+  //semaforo_updatetemp = xSemaphoreCreateBinary();
+  
+  
+  touchData touch;
+  
   
 	configure_lcd();
   
@@ -710,11 +718,9 @@ void task_lcd(void){
   font_draw_text(&digital52, "HH:MM", 10, 10, 1);
 	draw_icons();
 	draw_ar();
-	draw_temp();
+	draw_temp(0);
   
 	
-  touchData touch;
-  
   
   
   
@@ -723,9 +729,10 @@ void task_lcd(void){
 		  draw_ar();
 	  }
 	  
-	  if (xSemaphoreTake(semaforo_updatetemp,  0) == pdTRUE )
-	  {
-		  draw_temp();
+	    int32_t temperatura;
+
+	  if (xQueueReceive( xQueueTemp, &(temperatura), 0) ){
+		  draw_temp(temperatura);
 	  }
 	  
      if (xQueueReceive( xQueueTouch, &(touch), ( TickType_t )  500 / portTICK_PERIOD_MS)) {
@@ -736,14 +743,18 @@ void task_lcd(void){
 }
 
 void task_afec(void){
+	xQueueTemp = xQueueCreate( 10, sizeof( int32_t ) );
+
 	config_ADC_TEMP();
 	const TickType_t xDelay = 4000 / portTICK_PERIOD_MS;
 	
 	while (true) {
 		printf("Starting ADC\n");
 		afec_start_software_conversion(AFEC0);
-		BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-		xSemaphoreGiveFromISR(semaforo_updatetemp, &xHigherPriorityTaskWoken);
+		//BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+		//
+		//
+		//xSemaphoreGiveFromISR(semaforo_updatetemp, &xHigherPriorityTaskWoken);
 		vTaskDelay(xDelay);
 	}
 }
@@ -757,49 +768,7 @@ void task_led(void){
 	}
 }
 
-void io_init(void)
-{
 
-	//// Configura led
-	//pmc_enable_periph_clk(LED_PIO_ID);
-	//pio_configure(LED_PIO, PIO_OUTPUT_0, LED_IDX_MASK, PIO_DEFAULT);
-
-	// Inicializa clock do periférico PIO responsavel pelo botao
-	pmc_enable_periph_clk(BUT1_PIO_ID);
-	pio_configure(BUT1_PIO, PIO_INPUT, BUT1_IDX_MASK, PIO_PULLUP| PIO_DEBOUNCE);
-	pio_set_debounce_filter(BUT1_PIO,  BUT1_IDX_MASK, 10);
-	
-	pmc_enable_periph_clk(BUT3_PIO_ID);	
-	pio_configure(BUT3_PIO, PIO_INPUT, BUT3_IDX_MASK, PIO_PULLUP| PIO_DEBOUNCE);
-	pio_set_debounce_filter(BUT3_PIO, BUT3_IDX_MASK, 10);
-
-	pio_handler_set(BUT3_PIO,
-	BUT3_PIO_ID,
-	BUT3_IDX_MASK,
-	PIO_IT_FALL_EDGE,
-	but_freqM_callback);
-	
-	pio_handler_set(BUT1_PIO,
-	BUT1_PIO_ID,
-	BUT1_IDX_MASK,
-	PIO_IT_FALL_EDGE,
-	but_freqME_callback);
-	
-	
-	
-	NVIC_EnableIRQ(BUT3_PIO_ID);
-	NVIC_SetPriority(BUT3_PIO_ID, 5); // Prioridade 6
-	
-	pio_enable_interrupt(BUT3_PIO, BUT3_IDX_MASK);
-	
-	
-	
-	NVIC_EnableIRQ(BUT1_PIO_ID);
-	NVIC_SetPriority(BUT1_PIO_ID, 5); // Prioridade 6	
-	pio_enable_interrupt(BUT1_PIO, BUT1_IDX_MASK);	
-	
-	
-}
 
 /************************************************************************/
 /* main                                                                 */
